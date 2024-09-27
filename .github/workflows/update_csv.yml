@@ -1,0 +1,90 @@
+name: CSV Update
+
+on:
+  schedule:
+    - cron: '0 16 * * *' # Runs every day at 17:00  CET
+  workflow_dispatch:
+
+jobs:
+  update-csv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      # Step to set up R environment
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+
+      # Install required R libraries
+      - name: Install R Dependencies
+        run: |
+          Rscript -e 'install.packages(c("googlesheets4", "dplyr", "httr"))'
+
+      # Fetch data from Google Sheets and save it as CSV
+      - name: Fetch data from Google Sheets
+        env:
+          GOOGLE_SERVICE_TOKEN: ${{ secrets.GOOGLE_SERVICE_TOKEN }}
+        run: |
+          Rscript -e '
+          library(googlesheets4)
+          library(dplyr)
+          library(httr)
+
+          # Authenticate using the Google Service Token from secrets
+          service_token <- Sys.getenv("GOOGLE_SERVICE_TOKEN")
+          json_file <- tempfile()
+          writeLines(service_token, json_file)
+
+          # Authenticate with googlesheets4 using the service account JSON key
+          gs4_auth(path = json_file)
+
+          # Read data from Google Sheets
+          sheet_url <- "https://docs.google.com/spreadsheets/d/1weav3qdydHXLBYVfejVZH2wwSYKBZP9Xjb2y0Iw_q5Q/edit?gid=1068904194"
+          sheet_data <- read_sheet(sheet_url)
+
+          # Write the sheet data to a CSV file
+          write.csv(sheet_data, "data/new-data.csv", row.names = FALSE)
+          '
+
+      - name: Check for Differences
+        id: check-differences
+        run: |
+          if ! diff -q data/new-data.csv data/extracted_data.csv; then
+            echo "CSV files are different."
+            echo "DIFFERENT_CSV=true" >> $GITHUB_ENV
+          else
+            echo "CSV files are the same. Skipping commit."
+            echo "DIFFERENT_CSV=false" >> $GITHUB_ENV
+          fi
+
+      - name: Overwrite CSV
+        if: steps.check-differences.outputs.DIFFERENT_CSV == 'true'
+        run: |
+          mv data/new-data.csv data/extracted_data.csv
+
+      - name: Commit and Push Changes
+        if: env.DIFFERENT_CSV == 'true'
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          timestamp=$(date +'%Y%m%d%H%M%S')
+          branch_name="update-csv-$timestamp"
+
+          git checkout -b "$branch_name"
+
+          git add data/childcare_locations.csv
+
+          git commit -m "Update CSV file from Google Sheets"
+
+          git push origin "$branch_name"
+
+          git checkout main
+          git merge --no-ff "$branch_name"
+          git push origin main
+
+          # delete the temporary branch
+          git branch -d "$branch_name"
+          git push origin --delete "$branch_name"
